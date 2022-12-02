@@ -1,0 +1,17 @@
+{
+    "Path" : "C:/Program Files (x86)/Diablo II",
+    "ScreenCount" : "4",
+    "ScreenLayout": "Tiled",    
+    "Positions": [
+      {
+        "X_1": "0",
+        "Y_1": "0",
+        "X_2": "0",
+        "Y_2": "0",
+        "X_3": "0",
+        "Y_3": "0",
+        "X_4": "0",
+        "Y_4": "0"
+      }
+    ]
+}
