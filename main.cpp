@@ -5,7 +5,8 @@
 
 #include <fstream>
 #include <iostream>
-#include <vector>
+#include <chrono>
+#include <thread>
 #include <unordered_map>
 
 #include "nlohmann/json.hpp"
@@ -13,6 +14,12 @@
 const std::string GAMENAME = "Game.exe";
 const uint32_t GAME_WIDTH = 800;
 const uint32_t GAME_HEIGHT = 600;
+constexpr auto POLLING_PERIOD { std::chrono::milliseconds(500) };
+
+extern "C"
+{
+    void (WINAPI* TppRaiseInvalidParameter)();
+}
 
 enum ScreenLayout
 {
@@ -33,9 +40,14 @@ private:
     int m_Width;
 	int m_Height;
 	
-public:
-	D2Window(HANDLE hProcess, PROCESS_INFORMATION pi) : m_hProcess(hProcess), m_pi(pi) {}
-	~D2Window() { CloseHandle(m_hProcess); }
+public:    
+	D2Window(HANDLE hProcess, PROCESS_INFORMATION pi) : m_hProcess(hProcess), m_pi(pi),
+                                                        m_X(0), m_Y(0), m_Width(0), m_Height(0), m_hWnd(NULL) {}
+	~D2Window() 
+    {
+        CloseHandle(m_pi.hProcess);
+        CloseHandle(m_pi.hThread);
+    }
 	
     HANDLE GetProcessHandle() const { return m_hProcess; }
 	PROCESS_INFORMATION GetProcessInfo() const { return m_pi; }
@@ -62,13 +74,7 @@ public:
 		m_Height = d2window.GetHeight();        
 		
         return *this;
-    }
-	
-    friend std::ostream& operator<<(std::ostream& out, const D2Window& dw)
-    {
-        //Not implemented... yet?
-        return out;
-    }
+    }    
 };
 
 void ConvertScreenLayout(std::string_view str, ScreenLayout& layout)
@@ -98,7 +104,7 @@ void GetAllWindowsFromProcessID(DWORD dwProcessID, HWND &vhWnd)
     {
         hCurWnd = FindWindowEx(NULL, hCurWnd, NULL, NULL);
         std::wstring title(GetWindowTextLength(hCurWnd) + 1, L'\0');
-        GetWindowTextW(hCurWnd, &title[0], title.size());
+        GetWindowTextW(hCurWnd, &title[0], (int)title.size());
         DWORD dwProcID = 0;
         GetWindowThreadProcessId(hCurWnd, &dwProcID);
         if (dwProcID == dwProcessID)
@@ -113,10 +119,49 @@ void GetAllWindowsFromProcessID(DWORD dwProcessID, HWND &vhWnd)
     while (hCurWnd != NULL);
 }
 
+bool PopulateWindow(D2Window* window)
+{
+    HWND hwnd;
+    RECT rect;
+    GetAllWindowsFromProcessID(window->GetProcessInfo().dwProcessId, hwnd);
+    if (hwnd == NULL)
+        false;
+    window->SetWindowHandle(hwnd);
+    if (GetWindowRect(window->GetWindowHandle(), &rect))
+    {
+        window->SetWidth(rect.right - rect.left);
+        window->SetHeight(rect.bottom - rect.top);
+    }
+	return true;
+}
+
+bool PositionWindow(D2Window* window)
+{
+	if (window->GetWindowHandle() == NULL)
+		return false;
+	if (window->GetX() == 0 && window->GetY() == 0)
+		return false;
+	if (window->GetWidth() == 0 && window->GetHeight() == 0)
+		return false;
+	SetWindowPos(window->GetWindowHandle(), 
+                 0, 
+                 window->GetX(), 
+                 window->GetY(), 
+                 window->GetWidth()*2, 
+                 window->GetHeight()*2, 
+                 SWP_FRAMECHANGED | SWP_NOSIZE);
+	return true;
+}
+
 int main(int argc, char* argv[])
 {
-	std::vector<D2Window*> d2windows;
-    std::ifstream f("config.json");
+    //This is throwing that C0000000D error whenever a Game.exe dies...
+    //HMODULE ntdll;
+    //GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, "ntdll.dll", &ntdll);
+    //TppRaiseInvalidParameter = reinterpret_cast<decltype(TppRaiseInvalidParameter)>((LONG)ntdll + 0x104EBDL); // it's not an exported function and your offset may be different     
+	
+	std::unordered_map<DWORD, D2Window*> d2windows;
+    std::ifstream f("../config.json");
     if(!f.is_open())
     {
         std::cout << "Error opening file" << std::endl;
@@ -136,19 +181,20 @@ int main(int argc, char* argv[])
 
     d2windows.reserve((size_t)std::stoi(screenCount));
 
-    for(int i = 0; i < std::stoi(screenCount); i++)
-    {
-        STARTUPINFO si;     
-        PROCESS_INFORMATION pi;
-        ZeroMemory( &si, sizeof(STARTUPINFO) );
-        si.cb = sizeof(si);
-        ZeroMemory( &pi, sizeof(pi) );
+    //We're going to need all this stuff...
+    LPCWSTR game = gameWStr.c_str();
+    LPCSTR game2 = gameStr.c_str();
+    std::string cmdArgStr = GAMENAME + " -w -skip";
+    LPSTR cmdArgs = (LPSTR)cmdArgStr.c_str();
 
-        LPCWSTR game = gameWStr.c_str();
-        LPCSTR game2 = gameStr.c_str();
-        std::string cmdArgStr = GAMENAME + " -w";
-        LPSTR cmdArgs = (LPSTR)cmdArgStr.c_str();
-    
+    for(int i = 0; i < std::stoi(screenCount); i++)
+    {     
+        STARTUPINFO si;
+        PROCESS_INFORMATION pi;
+        ZeroMemory(&si, sizeof(STARTUPINFO));
+        si.cb = sizeof(si);
+        ZeroMemory(&pi, sizeof(pi));
+		
         if(!CreateProcess(
             game2,
             cmdArgs,           // Command line
@@ -169,7 +215,7 @@ int main(int argc, char* argv[])
         else
         {
 			std::cout << "Game process created successfully." << std::endl;
-			d2windows.push_back(new D2Window(pi.hProcess, pi));
+            d2windows[pi.dwProcessId] = new D2Window(pi.hProcess, pi);
             Sleep(500);
 		}
     }
@@ -188,89 +234,126 @@ int main(int argc, char* argv[])
 	
     for(auto& window : d2windows)
     {
-        GetAllWindowsFromProcessID(window->GetProcessInfo().dwProcessId, hwnd);
-        if (hwnd == NULL)
-            continue;
-        window->SetWindowHandle(hwnd);
-        if (GetWindowRect(window->GetWindowHandle(), &rect))
-        {
-            window->SetWidth(rect.right - rect.left);
-            window->SetHeight(rect.bottom - rect.top);
-        }
+        PopulateWindow(window.second);
         
         //There has to be a better way :pepeHands:
         switch (std::stoi(screenCount))
         {
         case 1:
-            window->SetX((screen_width) / 2);
-            window->SetY((screen_height) / 2);
+            window.second->SetX((screen_width) / 2);
+            window.second->SetY((screen_height) / 2);
             break;
         case 2:
 			if (screen_count == 0)
 			{
-				window->SetX((screen_width / 2) - window->GetWidth());
-				window->SetY((screen_height / 2) - (window->GetHeight() / 2));
+				window.second->SetX((screen_width / 2) - window.second->GetWidth());
+				window.second->SetY((screen_height / 2) - (window.second->GetHeight() / 2));
 			}
 			else if (screen_count == 1)
 			{
-                window->SetX(screen_width / 2);
-				window->SetY((screen_height / 2) - (window->GetHeight() / 2));
+                window.second->SetX(screen_width / 2);
+				window.second->SetY((screen_height / 2) - (window.second->GetHeight() / 2));
 			}
             break;
         case 3:
             if (screen_count == 0)
             {
-                window->SetX((screen_width / 2) - (window->GetWidth()/2));
-                window->SetY((screen_height / 2) - window->GetHeight());
+                window.second->SetX((screen_width / 2) - (window.second->GetWidth()/2));
+                window.second->SetY((screen_height / 2) - window.second->GetHeight());
             }
             else if (screen_count == 1)
             {
-                window->SetX(screen_width / 2);
-                window->SetY(screen_height / 2);
+                window.second->SetX(screen_width / 2);
+                window.second->SetY(screen_height / 2);
             }
 			else if (screen_count == 2)
 			{
-				window->SetX((screen_width / 2) - window->GetWidth());
-				window->SetY(screen_height / 2);
+				window.second->SetX((screen_width / 2) - window.second->GetWidth());
+				window.second->SetY(screen_height / 2);
 			}
             break;
         case 4:
             if (screen_count == 0)
             {
-                window->SetX((screen_width / 2) - window->GetWidth());
-                window->SetY((screen_height / 2) - window->GetHeight());
+                window.second->SetX((screen_width / 2) - window.second->GetWidth());
+                window.second->SetY((screen_height / 2) - window.second->GetHeight());
             }
             else if (screen_count == 1)
             {
-                window->SetX(screen_width / 2);
-                window->SetY((screen_height / 2) - window->GetHeight());
+                window.second->SetX(screen_width / 2);
+                window.second->SetY((screen_height / 2) - window.second->GetHeight());
             }
             else if (screen_count == 2)
             {
-                window->SetX(screen_width / 2);
-                window->SetY(screen_height / 2);
+                window.second->SetX(screen_width / 2);
+                window.second->SetY(screen_height / 2);
             }
 			else if (screen_count == 3)
 			{
-                window->SetX((screen_width / 2) - window->GetWidth());
-                window->SetY(screen_height / 2);
+                window.second->SetX((screen_width / 2) - window.second->GetWidth());
+                window.second->SetY(screen_height / 2);
 			}
             break;
         default:
             break;
         }
 		
-        SetWindowPos(hwnd, 0, window->GetX(), window->GetY(), window->GetWidth(), window->GetHeight(), SWP_FRAMECHANGED | SWP_NOSIZE);
+        PositionWindow(window.second);
         screen_count++;
     }
     
-    //Development stuff so we don't spawn too many windows.
-    WaitForSingleObject(d2windows[0]->GetProcessHandle(), INFINITE);
-
-    for (auto& window : d2windows)
+    while (true)
     {
-        delete window;
+        for (auto& window : d2windows)
+		{
+			DWORD exitCode = 0;
+            GetExitCodeProcess(window.second->GetProcessHandle(), &exitCode);
+            if (exitCode != STILL_ACTIVE)
+            {
+                std::cout << "Game died. Attempting to resume... " << std::endl;
+				
+                STARTUPINFO si;
+                PROCESS_INFORMATION pi;
+                ZeroMemory(&si, sizeof(STARTUPINFO));
+                si.cb = sizeof(si);
+                ZeroMemory(&pi, sizeof(pi));
+                if (!CreateProcess(
+                    game2,
+                    cmdArgs,           // Command line
+                    NULL,           // Process handle not inheritable
+                    NULL,           // Thread handle not inheritable
+                    FALSE,          // Set handle inheritance to FALSE
+                    0,              // No creation flags
+                    NULL,           // Use parent's environment block
+                    NULL,           // Use parent's starting directory 
+                    &si,             // Pointer to STARTUPINFO structure
+                    &pi             // Pointer to PROCESS_INFORMATION structure
+                ))
+                {
+                    if (GetLastError() == 740)
+                        std::cout << "Failed to load game. Please elevate privileges. (Run as Admin Dummy :kekw:)" << std::endl;
+                }
+                else
+                {
+					std::cout << "Game process created successfully." << std::endl;					                    
+                    d2windows[pi.dwProcessId] = new D2Window(pi.hProcess, pi);
+                    d2windows[pi.dwProcessId]->SetX(window.second->GetX());
+					d2windows[pi.dwProcessId]->SetY(window.second->GetY());
+					d2windows[pi.dwProcessId]->SetWidth(window.second->GetWidth());
+					d2windows[pi.dwProcessId]->SetHeight(window.second->GetHeight());					
+                    delete window.second;
+                    d2windows.erase(window.first);
+
+                    PopulateWindow(d2windows[pi.dwProcessId]);
+                    Sleep(100);
+                    PositionWindow(d2windows[pi.dwProcessId]);
+                    break;
+                }
+            }
+        }
+
+        std::this_thread::sleep_for(POLLING_PERIOD);
     }
-	
+
     return 0;
 }
