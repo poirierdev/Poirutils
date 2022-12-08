@@ -164,7 +164,9 @@ int main(int argc, char* argv[])
     std::ifstream f("../config.json");
     if(!f.is_open())
     {
-        std::cout << "Error opening file" << std::endl;
+        f.open("config.json");
+        if(!f.is_open())
+            std::cout << "Error opening file" << std::endl;
     }
     nlohmann::json data = nlohmann::json::parse(f);
     std::string game_path = data["Path"];    
